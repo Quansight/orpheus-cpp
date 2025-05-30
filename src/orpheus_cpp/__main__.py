@@ -21,15 +21,10 @@ from fastrtc import (
     wait_for_item,
 )
 from fastrtc.utils import create_message
-from huggingface_hub import InferenceClient
 
 from orpheus_cpp.model import OrpheusCpp
 
 async_client = httpx.AsyncClient()
-
-client = InferenceClient(
-    model="meta-llama/Llama-4-Maverick-17B-128E-Instruct", provider="sambanova"
-)
 
 
 language_code_to_language = {
@@ -55,21 +50,7 @@ Example: こんにちは、今日は元気ですか？
 Example: नमस्ते, आप कैसे हैं?
 Example: "Ciao, come stai?"
 """
-
-    response = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"Give me a short sentence please for this language code: {language_code_to_language[lang]}.",
-            },
-        ],
-        max_tokens=100,
-        seed=random.randint(0, 1000000),
-    )
-    msg = response.choices[0].message.content
-    if msg:
-        msg = msg.replace('"', "")
+    msg = "This is a temporary placeholder message"
     return msg
 
 

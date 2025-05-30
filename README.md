@@ -81,4 +81,4 @@ async for sample_rate, samples in orpheus.stream_tts(text, options={"voice_id": 
 
 ## License
 
-`orpheus-cpp` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license.
+`orpheus-cpp` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license, with an adapted section of code from https://github.com/Lex-au/Orpheus-FastAPI/ that is covered under Apache-2.0 license, in LICENSES/Apache-2.0.txt and noted in place.
