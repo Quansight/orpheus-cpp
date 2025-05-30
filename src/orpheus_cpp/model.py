@@ -1,6 +1,7 @@
 import asyncio
 import platform
 import sys
+import os
 import threading
 from typing import (
     AsyncGenerator,
@@ -15,7 +16,11 @@ import onnxruntime
 from huggingface_hub import hf_hub_download
 from numpy.typing import NDArray
 from typing_extensions import NotRequired, TypedDict
+from llama_cpp import CreateCompletionStreamResponse
+from dotenv import load_dotenv
 
+import requests
+import json
 
 class TTSOptions(TypedDict):
     max_tokens: NotRequired[int]
@@ -57,53 +62,11 @@ class OrpheusCpp:
         n_threads: int = 0,
         verbose: bool = True,
         lang: Literal["en", "es", "ko", "fr"] = "es",
+        endpoint: str = "http://127.0.0.1:5001/v1/completions",
+        is_cloud: bool = False,
     ):
-        import importlib.util
-
-        if importlib.util.find_spec("llama_cpp") is None:
-            if sys.platform == "darwin":
-                # Check if macOS 11.0+ on arm64 (Apple Silicon)
-                is_arm64 = platform.machine() == "arm64"
-                version = platform.mac_ver()[0].split(".")
-                is_macos_11_plus = len(version) >= 2 and int(version[0]) >= 11
-                is_macos_10_less = len(version) >= 2 and int(version[0]) < 11
-
-                if is_arm64 and is_macos_11_plus:
-                    extra_index_url = "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal"
-                elif is_macos_10_less:
-                    raise ImportError(
-                        "llama_cpp does not have pre-built wheels for macOS 10.x "
-                        "Follow install instructions at https://github.com/abetlen/llama-cpp-python"
-                    )
-                else:
-                    extra_index_url = "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu"
-            else:
-                extra_index_url = "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu"
-
-            raise ImportError(
-                f"llama_cpp is not installed. Please install it using `pip install llama-cpp-python {extra_index_url}`."
-            )
-        repo_id = self.lang_to_model[lang]
-        model_file = hf_hub_download(
-            repo_id=repo_id,
-            filename=repo_id.split("/")[-1].lower().replace("-gguf", ".gguf"),
-        )
-        from llama_cpp import Llama
-
-        if n_gpu_layers == 0:
-            print(
-                "Running model without GPU Acceleration. Please set n_gpu_layers parameters to control the number of layers to offload to GPU."
-            )
-
-        self._llm = Llama(
-            model_path=model_file,
-            n_ctx=0,
-            verbose=verbose,
-            n_gpu_layers=n_gpu_layers,
-            n_threads=n_threads,
-            batch_size=1,
-        )
-
+        self.endpoint = endpoint
+        self.is_cloud = is_cloud
         repo_id = "onnx-community/snac_24khz-ONNX"
         snac_model_file = "decoder_model.onnx"
         snac_model_path = hf_hub_download(
@@ -226,13 +189,13 @@ class OrpheusCpp:
         queue = asyncio.Queue()
         finished = asyncio.Event()
 
-        def strem_to_queue(text, options, queue, finished):
+        def stream_to_queue(text, options, queue, finished):
             for chunk in self.stream_tts_sync(text, options):
                 queue.put_nowait(chunk)
             finished.set()
 
         thread = threading.Thread(
-            target=strem_to_queue, args=(text, options, queue, finished)
+            target=stream_to_queue, args=(text, options, queue, finished)
         )
         thread.start()
         while not finished.is_set():
@@ -244,25 +207,90 @@ class OrpheusCpp:
             chunk = queue.get_nowait()
             yield chunk
 
-    def _token_gen(
-        self, text: str, options: TTSOptions | None = None
-    ) -> Generator[str, None, None]:
-        from llama_cpp import CreateCompletionStreamResponse
+    def _stream_response(self, response):
+        for line in response.iter_lines():
+            if line:
+                line_str = line.decode('utf-8')
+                if line_str.startswith('data: '):
+                    data_str = line_str[6:]  # Remove the 'data: ' prefix
+                    
+                    if data_str.strip() == '[DONE]':
+                        break
+                        
+                    try:
+                        data = json.loads(data_str)
+                        if 'choices' in data and len(data['choices']) > 0:
+                            token_chunk = data['choices'][0].get('text', '')
+                            
+                            for token_text in token_chunk.split('>'):
+                                token_text = f'{token_text}>'
 
+                                if token_text:
+                                    yield token_text
+                    except json.JSONDecodeError as e:
+                        print(f"Error decoding JSON: {e}")
+                        continue
+    
+    def _token_gen(self, text: str, options: TTSOptions | None = None):
+        """adapted from Orpheus-FastAPI: https://github.com/Lex-au/Orpheus-FastAPI"""
+        API_URL = self.endpoint
+        HEADERS = {
+            "Content-Type": "application/json"
+        }
+
+        REQUEST_TIMEOUT = 120
+        
         options = options or TTSOptions()
         voice_id = options.get("voice_id", "tara")
-        text = f"<|audio|>{voice_id}: {text}<|eot_id|><custom_token_4>"
-        token_gen = self._llm(
-            text,
-            max_tokens=options.get("max_tokens", 2_048),
+
+        formatted_prompt = f"{voice_id}: {text}"
+        text = f"<custom_token_3>{formatted_prompt}<|eot_id|><custom_token_4><custom_token_5><custom_token_1>"
+
+        payload = {
+            "model": "Orpheus-3b-ft-425bpw-exl2",
+            "prompt": text,
+            "max_tokens": options.get("max_tokens", 8192),
+            "temperature": options.get("temperature", 0.6),
+            "top_p": options.get("top_p", 0.90),
+            "min_p":0.05,
+            "repetition_penalty": 1.1,
+            "stream": True
+        }
+        
+        if self.is_cloud:
+            load_dotenv()
+            RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
+            HEADERS = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {RUNPOD_API_KEY}"
+            }
+
+        session = requests.Session()
+        
+        retry_count = 0
+        max_retries = 3
+        
+        response = session.post(
+            API_URL, 
+            headers=HEADERS, 
+            json=payload, 
             stream=True,
-            temperature=options.get("temperature", 0.8),
-            top_p=options.get("top_p", 0.95),
-            top_k=options.get("top_k", 40),
-            min_p=options.get("min_p", 0.05),
+            timeout=REQUEST_TIMEOUT
         )
-        for token in cast(Iterator[CreateCompletionStreamResponse], token_gen):
-            yield token["choices"][0]["text"]
+        
+        if response.status_code != 200:
+            print(f"Error: API request failed with status code {response.status_code}")
+            print(f"Error details: {response.text}")
+            # Retry on server errors (5xx) but not on client errors (4xx)
+            if response.status_code >= 500:
+                retry_count += 1
+                wait_time = 2 ** retry_count  # Exponential backoff
+                print(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            return
+        else:
+            for token in self._stream_response(response):
+                yield token
 
     def stream_tts_sync(
         self, text: str, options: TTSOptions | None = None
@@ -270,7 +298,7 @@ class OrpheusCpp:
         options = options or TTSOptions()
         token_gen = self._token_gen(text, options)
         pre_buffer = np.array([], dtype=np.int16).reshape(1, 0)
-        pre_buffer_size = 24_000 * options.get("pre_buffer_size", 1.5)
+        pre_buffer_size = 24_000 * options.get("pre_buffer_size", 0.1)
         started_playback = False
         for audio_bytes in self._decode(token_gen):
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).reshape(1, -1)
