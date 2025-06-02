@@ -22,7 +22,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = ["huggingface-hub","onnxruntime", "transformers", "numpy>=2.0"]
+dependencies = ["huggingface-hub","onnxruntime", "transformers", "numpy>=2.0", "llama-cpp-python", "python-dotenv"]
 
 [project.urls]
 Documentation = "https://github.com/freddyaboulton/orpheus-cpp#readme"
